@@ -121,7 +121,7 @@ const renderTable = (k: number, rows: string[][], t: Theme) => {
             ))}
           </Box>
           {ri === 0 && rows.length > 1 ? (
-            <Text color={t.color.dim} dimColor>
+            <Text color={t.color.muted} dimColor>
               {sep}
             </Text>
           ) : null}
