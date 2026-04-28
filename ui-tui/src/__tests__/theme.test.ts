@@ -1,15 +1,46 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { DARK_THEME, DEFAULT_THEME, detectLightMode, fromSkin, LIGHT_THEME } from '../theme.js'
+import { DARK_THEME, detectLightMode, fromSkin, LIGHT_THEME } from '../theme.js'
+
+// `DEFAULT_THEME` is computed from `process.env` at module-load.  A
+// developer shell with HERMES_TUI_THEME=light (or HERMES_TUI_BACKGROUND
+// set to something bright) would flip the global default and turn
+// these assertions into a local-only failure.  Sterilize the relevant
+// env vars + force a fresh import so DEFAULT_THEME is computed against
+// a known-empty environment.
+const RELEVANT_ENV = [
+  'HERMES_TUI_LIGHT',
+  'HERMES_TUI_THEME',
+  'HERMES_TUI_BACKGROUND',
+  'COLORFGBG',
+  'TERM_PROGRAM',
+] as const
+
+async function importThemeWithCleanEnv() {
+  for (const key of RELEVANT_ENV) {
+    vi.stubEnv(key, '')
+  }
+  vi.resetModules()
+  return import('../theme.js')
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+  vi.resetModules()
+})
 
 describe('DEFAULT_THEME', () => {
-  it('has brand defaults', () => {
+  it('has brand defaults', async () => {
+    const { DEFAULT_THEME } = await importThemeWithCleanEnv()
+
     expect(DEFAULT_THEME.brand.name).toBe('Hermes Agent')
     expect(DEFAULT_THEME.brand.prompt).toBe('❯')
     expect(DEFAULT_THEME.brand.tool).toBe('┊')
   })
 
-  it('has color palette', () => {
+  it('has color palette', async () => {
+    const { DEFAULT_THEME } = await importThemeWithCleanEnv()
+
     expect(DEFAULT_THEME.color.gold).toBe('#FFD700')
     expect(DEFAULT_THEME.color.error).toBe('#ef5350')
   })
@@ -30,8 +61,10 @@ describe('LIGHT_THEME', () => {
 })
 
 describe('DEFAULT_THEME aliasing', () => {
-  it('defaults to DARK_THEME when nothing signals light', () => {
-    expect(DEFAULT_THEME).toBe(DARK_THEME)
+  it('defaults to DARK_THEME when nothing signals light', async () => {
+    const { DEFAULT_THEME, DARK_THEME: DARK } = await importThemeWithCleanEnv()
+
+    expect(DEFAULT_THEME).toBe(DARK)
   })
 })
 
@@ -54,6 +87,18 @@ describe('detectLightMode', () => {
     expect(detectLightMode({ COLORFGBG: '0;7' })).toBe(true)
     expect(detectLightMode({ COLORFGBG: '15;0' })).toBe(false)
     expect(detectLightMode({ COLORFGBG: '7;default;0' })).toBe(false)
+  })
+
+  it('falls through on malformed COLORFGBG with empty/non-numeric trailing field', () => {
+    // `Number('')` is 0, so `'15;'` would have been read as bg=0
+    // (authoritative dark) and incorrectly blocked TERM_PROGRAM.
+    // The strict /^\d+$/ guard makes these fall through instead.
+    const allowList = new Set(['Apple_Terminal'])
+
+    expect(detectLightMode({ COLORFGBG: '15;', TERM_PROGRAM: 'Apple_Terminal' }, allowList)).toBe(true)
+    expect(detectLightMode({ COLORFGBG: 'default;default', TERM_PROGRAM: 'Apple_Terminal' }, allowList)).toBe(true)
+    // Without an allow-list match, fall-through still defaults to dark.
+    expect(detectLightMode({ COLORFGBG: '15;' })).toBe(false)
   })
 
   it('lets HERMES_TUI_LIGHT=0 override a light COLORFGBG', () => {
@@ -110,7 +155,10 @@ describe('fromSkin', () => {
   })
 
   it('preserves unset colors', () => {
-    expect(fromSkin({ banner_title: '#FF0000' }, {}).color.amber).toBe(DEFAULT_THEME.color.amber)
+    // `fromSkin` always extends the dark base palette, regardless of
+    // ambient `HERMES_TUI_THEME` — `DEFAULT_THEME` would couple this
+    // assertion to local env state.
+    expect(fromSkin({ banner_title: '#FF0000' }, {}).color.amber).toBe(DARK_THEME.color.amber)
   })
 
   it('overrides branding', () => {
@@ -120,8 +168,8 @@ describe('fromSkin', () => {
   })
 
   it('defaults for empty skin', () => {
-    expect(fromSkin({}, {}).color).toEqual(DEFAULT_THEME.color)
-    expect(fromSkin({}, {}).brand.icon).toBe(DEFAULT_THEME.brand.icon)
+    expect(fromSkin({}, {}).color).toEqual(DARK_THEME.color)
+    expect(fromSkin({}, {}).brand.icon).toBe(DARK_THEME.brand.icon)
   })
 
   it('passes banner logo/hero', () => {

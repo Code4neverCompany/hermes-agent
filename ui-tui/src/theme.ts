@@ -277,17 +277,25 @@ export function detectLightMode(
   const colorfgbg = (env.COLORFGBG ?? '').trim()
 
   if (colorfgbg) {
-    const bg = Number(colorfgbg.split(';').at(-1))
+    // Validate as a decimal integer before coercing — `Number('')` is 0,
+    // so a malformed `COLORFGBG='15;'` would otherwise look like an
+    // authoritative dark slot and incorrectly block the TERM_PROGRAM
+    // allow-list.  Anything that isn't pure digits falls through.
+    const lastField = colorfgbg.split(';').at(-1) ?? ''
 
-    if (bg === 7 || bg === 15) {
-      return true
-    }
+    if (/^\d+$/.test(lastField)) {
+      const bg = Number(lastField)
 
-    // 0–6 / 8–15 ranges are dark.  When COLORFGBG is set we trust it
-    // as authoritative — terminals that emit a non-light value here
-    // shouldn't get overridden by the TERM_PROGRAM allow-list.
-    if (Number.isFinite(bg) && bg >= 0 && bg < 16) {
-      return false
+      if (bg === 7 || bg === 15) {
+        return true
+      }
+
+      // Slots 0–6 and 8–14 are the dark half of the 0–15 ANSI range.
+      // When COLORFGBG is set we trust it as authoritative — a non-light
+      // value here shouldn't get overridden by the TERM_PROGRAM allow-list.
+      if (bg >= 0 && bg < 16) {
+        return false
+      }
     }
   }
 
