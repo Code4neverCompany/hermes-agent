@@ -219,10 +219,23 @@ export function useSubmission(opts: UseSubmissionOptions) {
   //                   tool window).
   //   - 'interrupt' (default): cancel the in-flight turn, then send the
   //                   new text as a fresh prompt so it actually moves.
+  //
+  // Returns whether the steer fallback should re-insert at the front of
+  // the queue (used by the queue-edit path to preserve a picked item's
+  // position; the mainline submit path always appends).
   const handleBusyInput = useCallback(
-    (full: string) => {
+    (full: string, opts: { fallbackToFront?: boolean } = {}) => {
       const live = getUiState()
       const mode = live.busyInputMode
+      const fallback = (note: string) => {
+        if (opts.fallbackToFront) {
+          composerRefs.queueRef.current.unshift(full)
+          composerActions.syncQueue()
+        } else {
+          composerActions.enqueue(full)
+        }
+        sys(note)
+      }
 
       if (mode === 'queue') {
         return composerActions.enqueue(full)
@@ -234,19 +247,20 @@ export function useSubmission(opts: UseSubmissionOptions) {
             const r = asRpcResult<SessionSteerResponse>(raw)
 
             if (r?.status !== 'queued') {
-              composerActions.enqueue(full)
-              sys('steer rejected — message queued for next turn')
+              fallback('steer rejected — message queued for next turn')
             }
           })
-          .catch(() => {
-            composerActions.enqueue(full)
-            sys('steer failed — message queued for next turn')
-          })
+          .catch(() => fallback('steer failed — message queued for next turn'))
 
         return
       }
 
       // 'interrupt' (default): tear down the current turn, then send.
+      // `interruptTurn` fires `session.interrupt` without awaiting; if
+      // the gateway is still mid-response when `prompt.submit` lands,
+      // `send()`'s catch path re-queues with a "queued: ..." sys note
+      // (`isSessionBusyError`) — so a lost race degrades to queue
+      // semantics, not a dropped message.
       if (live.sid) {
         turnController.interruptTurn({ appendMessage, gw, sid: live.sid, sys })
       }
@@ -259,7 +273,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       send(full)
     },
-    [appendMessage, composerActions, gw, interpolate, send, sys]
+    [appendMessage, composerActions, composerRefs, gw, interpolate, send, sys]
   )
 
   const dispatchSubmission = useCallback(
@@ -316,7 +330,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
             return composerActions.syncQueue()
           }
 
-          return handleBusyInput(picked)
+          return handleBusyInput(picked, { fallbackToFront: true })
         }
 
         return sendQueued(picked)
