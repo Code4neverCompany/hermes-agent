@@ -334,10 +334,12 @@ export function TextInput({
 
   const layout = useMemo(() => cursorLayout(display, cur, columns), [columns, cur, display])
 
+  const canUseNativeCursor = Boolean(display)
+
   const boxRef = useDeclaredCursor({
     line: layout.line,
     column: layout.column,
-    active: focus && termFocus && !selected
+    active: focus && termFocus && !selected && canUseNativeCursor
   })
 
   // Hide the hardware cursor while a selection is active (prevents
@@ -358,7 +360,7 @@ export function TextInput({
     }
   }, [hideHardwareCursor, stdout])
 
-  const nativeCursor = focus && termFocus && !selected && !!stdout?.isTTY
+  const nativeCursor = focus && termFocus && !selected && canUseNativeCursor && !!stdout?.isTTY
 
   const rendered = useMemo(() => {
     if (!focus) {
