@@ -344,9 +344,12 @@ export function TextInput({
 
   // Hide the hardware cursor while a selection is active (prevents
   // auto-wrap onto the next row when inverted text fills the column
-  // exactly) or when the terminal loses focus (suppresses the hollow-rect
-  // ghost most terminals draw at the parked position).
-  const hideHardwareCursor = focus && !!stdout?.isTTY && (!!selected || !termFocus)
+  // exactly), when the terminal loses focus (suppresses the hollow-rect
+  // ghost most terminals draw at the parked position), or while rendering
+  // a placeholder with the synthetic cursor. Otherwise Terminal.app can
+  // show both cursors: one parked before the prompt and one on the
+  // placeholder's first character.
+  const hideHardwareCursor = focus && !!stdout?.isTTY && (!!selected || !termFocus || !canUseNativeCursor)
 
   useEffect(() => {
     if (!hideHardwareCursor || !stdout) {
