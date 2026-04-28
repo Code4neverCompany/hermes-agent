@@ -310,6 +310,47 @@ detect_os() {
     log_success "Detected: $OS ($DISTRO)"
 }
 
+# Detect the *launcher* context — i.e. whether the script is being driven
+# directly from a real terminal or from a headless/embedded environment such
+# as the Hermes Desktop installer, Wine, or a Windows-spawned WSL subshell.
+# In those cases sudo/apt-based browser-deps installs cannot work, and TTY-
+# bound prompts will hang. install_node_deps consults $LAUNCHER and degrades
+# Playwright's `--with-deps` (apt sudo) step gracefully instead of producing
+# false-failure warnings.
+detect_launcher() {
+    LAUNCHER="terminal"
+
+    if [ -n "${HERMES_DESKTOP_LAUNCHER:-}" ]; then
+        LAUNCHER="desktop"
+    elif [ -n "${WINEPREFIX:-}" ] || [ -n "${WINELOADER:-}" ]; then
+        LAUNCHER="wine"
+    elif [ -r /proc/version ] && grep -qi 'microsoft' /proc/version 2>/dev/null; then
+        # WSL / WSL2: real Linux but typically no non-interactive sudo when
+        # spawned from a Windows-side .exe with no terminal attached.
+        if [ "$IS_INTERACTIVE" = false ]; then
+            LAUNCHER="wsl_headless"
+        fi
+    elif [ "$IS_INTERACTIVE" = false ] && ! [ -t 1 ]; then
+        # No stdin, no stdout TTY: e.g. spawned by a GUI installer.
+        LAUNCHER="headless"
+    fi
+
+    if [ "$LAUNCHER" != "terminal" ]; then
+        log_info "Launcher context: $LAUNCHER (will skip steps that require interactive sudo)"
+    fi
+}
+
+# True when the script is being driven by a non-terminal launcher (Hermes
+# Desktop, Wine, or a Windows-spawned headless WSL/shell). In these contexts
+# we cannot run apt-based --with-deps installs and must not emit false-failure
+# warnings for steps that were intentionally skipped.
+is_managed_launcher() {
+    case "$LAUNCHER" in
+        desktop|wine|wsl_headless|headless) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ============================================================================
 # Dependency checks
 # ============================================================================
@@ -1244,84 +1285,144 @@ install_node_deps() {
         return 0
     fi
 
+    # Run `npm install` in $1, capturing stderr to a temp file so the real
+    # error surfaces on failure (the previous `2>/dev/null` swallowed it,
+    # producing the misleading "may not work" warning even when the actual
+    # error was something fixable like a missing tool or a permission
+    # problem). Returns 0 on success, 1 on failure (and prints the error).
+    _hermes_npm_install() {
+        local dir="$1"
+        local label="$2"
+        local err_file
+        err_file="$(mktemp 2>/dev/null || echo "/tmp/hermes-npm-install.$$.err")"
+        if (cd "$dir" && npm install --silent 2>"$err_file" >/dev/null); then
+            rm -f "$err_file"
+            return 0
+        fi
+        local rc=$?
+        log_warn "${label} npm install failed (exit $rc)"
+        if [ -s "$err_file" ]; then
+            # Show the last few lines so users know what to fix.
+            log_warn "  npm error tail:"
+            tail -n 5 "$err_file" | sed 's/^/    /' >&2
+        fi
+        rm -f "$err_file"
+        return 1
+    }
+
     if [ -f "$INSTALL_DIR/package.json" ]; then
         log_info "Installing Node.js dependencies (browser tools)..."
-        cd "$INSTALL_DIR"
-        npm install --silent 2>/dev/null || {
-            log_warn "npm install failed (browser tools may not work)"
-        }
-        log_success "Node.js dependencies installed"
+        if _hermes_npm_install "$INSTALL_DIR" "Browser-tools"; then
+            log_success "Node.js dependencies installed"
 
-        # Install Playwright browser + system dependencies.
-        # Playwright's --with-deps only supports apt-based systems natively.
-        # For Arch/Manjaro we install the system libs via pacman first.
-        # Other systems must install Chromium dependencies manually.
-        log_info "Installing browser engine (Playwright Chromium)..."
-        case "$DISTRO" in
-            ubuntu|debian|raspbian|pop|linuxmint|elementary|zorin|kali|parrot)
-                log_info "Playwright may request sudo to install browser system dependencies (shared libraries)."
-                log_info "This is standard Playwright setup — Hermes itself does not require root access."
-                cd "$INSTALL_DIR" && npx playwright install --with-deps chromium 2>/dev/null || {
-                    log_warn "Playwright browser installation failed — browser tools will not work."
-                    log_warn "Try running manually: cd $INSTALL_DIR && npx playwright install --with-deps chromium"
-                }
-                ;;
-            arch|manjaro)
-                if command -v pacman &> /dev/null; then
-                    log_info "Arch/Manjaro detected — installing Chromium system dependencies via pacman..."
-                    if command -v sudo &> /dev/null && sudo -n true 2>/dev/null; then
-                        sudo NEEDRESTART_MODE=a pacman -S --noconfirm --needed \
-                            nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib >/dev/null 2>&1 || true
-                    elif [ "$(id -u)" -eq 0 ]; then
-                        pacman -S --noconfirm --needed \
-                            nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib >/dev/null 2>&1 || true
-                    else
-                        log_warn "Cannot install browser deps without sudo. Run manually:"
-                        log_warn "  sudo pacman -S nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib"
-                    fi
+            # Install the Playwright browser binary (and system deps where
+            # we can do it without an interactive sudo prompt). Strategy:
+            #   - Managed launcher (Hermes Desktop, Wine, headless WSL):
+            #     never attempt --with-deps (no TTY for sudo); just install
+            #     the Chromium binary, which is self-contained.
+            #   - Linux distros where Playwright supports --with-deps and
+            #     non-interactive sudo is available: full install.
+            #   - Otherwise: browser binary only, with a clear note about
+            #     manual system-dep install.
+            log_info "Installing browser engine (Playwright Chromium)..."
+            local pw_strategy=""
+            local pw_skip_deps_reason=""
+
+            if is_managed_launcher; then
+                pw_strategy="binary_only"
+                pw_skip_deps_reason="launcher=$LAUNCHER cannot run interactive sudo"
+            else
+                case "$DISTRO" in
+                    ubuntu|debian|raspbian|pop|linuxmint|elementary|zorin|kali|parrot)
+                        if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                            pw_strategy="with_deps"
+                        elif [ "$(id -u)" -eq 0 ]; then
+                            pw_strategy="with_deps"
+                        else
+                            pw_strategy="binary_only"
+                            pw_skip_deps_reason="non-interactive sudo unavailable"
+                        fi
+                        ;;
+                    arch|manjaro)
+                        if command -v pacman >/dev/null 2>&1; then
+                            log_info "Arch/Manjaro detected — installing Chromium system dependencies via pacman..."
+                            if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                                sudo NEEDRESTART_MODE=a pacman -S --noconfirm --needed \
+                                    nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib >/dev/null 2>&1 || true
+                            elif [ "$(id -u)" -eq 0 ]; then
+                                pacman -S --noconfirm --needed \
+                                    nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib >/dev/null 2>&1 || true
+                            else
+                                log_info "Skipping pacman browser-deps install (no non-interactive sudo)."
+                                log_info "If browser tools fail, run manually:"
+                                log_info "  sudo pacman -S nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib"
+                            fi
+                        fi
+                        pw_strategy="binary_only"
+                        ;;
+                    fedora|rhel|centos|rocky|alma)
+                        log_info "RPM-based system: install Chromium system deps manually if browser tools fail:"
+                        log_info "  sudo dnf install nss atk at-spi2-core cups-libs libdrm libxkbcommon mesa-libgbm pango cairo alsa-lib"
+                        pw_strategy="binary_only"
+                        ;;
+                    opensuse*|sles)
+                        log_info "zypper-based system: install Chromium system deps manually if browser tools fail:"
+                        log_info "  sudo zypper install mozilla-nss libatk-1_0-0 at-spi2-core cups-libs libdrm2 libxkbcommon0 Mesa-libgbm1 pango cairo libasound2"
+                        pw_strategy="binary_only"
+                        ;;
+                    *)
+                        log_info "Browser system-deps must be installed manually for $DISTRO."
+                        pw_strategy="binary_only"
+                        ;;
+                esac
+            fi
+
+            local pw_err_file
+            pw_err_file="$(mktemp 2>/dev/null || echo "/tmp/hermes-playwright.$$.err")"
+            local pw_ok=false
+            if [ "$pw_strategy" = "with_deps" ]; then
+                log_info "Playwright may request sudo to install browser system dependencies."
+                if (cd "$INSTALL_DIR" && npx playwright install --with-deps chromium 2>"$pw_err_file" >/dev/null); then
+                    pw_ok=true
                 fi
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || {
-                    log_warn "Playwright browser installation failed — browser tools will not work."
-                }
-                ;;
-            fedora|rhel|centos|rocky|alma)
-                log_warn "Playwright does not support automatic dependency installation on RPM-based systems."
-                log_info "Install Chromium system dependencies manually before using browser tools:"
-                log_info "  sudo dnf install nss atk at-spi2-core cups-libs libdrm libxkbcommon mesa-libgbm pango cairo alsa-lib"
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || {
-                    log_warn "Playwright browser installation failed — install dependencies above and retry."
-                }
-                ;;
-            opensuse*|sles)
-                log_warn "Playwright does not support automatic dependency installation on zypper-based systems."
-                log_info "Install Chromium system dependencies manually before using browser tools:"
-                log_info "  sudo zypper install mozilla-nss libatk-1_0-0 at-spi2-core cups-libs libdrm2 libxkbcommon0 Mesa-libgbm1 pango cairo libasound2"
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || {
-                    log_warn "Playwright browser installation failed — install dependencies above and retry."
-                }
-                ;;
-            *)
-                log_warn "Playwright does not support automatic dependency installation on $DISTRO."
-                log_info "Install Chromium/browser system dependencies for your distribution, then run:"
-                log_info "  cd $INSTALL_DIR && npx playwright install chromium"
-                log_info "Browser tools will not work until dependencies are installed."
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || true
-                ;;
-        esac
-        log_success "Browser engine setup complete"
+            else
+                if [ -n "$pw_skip_deps_reason" ]; then
+                    log_info "Skipping Playwright system-deps step ($pw_skip_deps_reason); installing browser binary only."
+                fi
+                if (cd "$INSTALL_DIR" && npx playwright install chromium 2>"$pw_err_file" >/dev/null); then
+                    pw_ok=true
+                fi
+            fi
+
+            if [ "$pw_ok" = true ]; then
+                log_success "Browser engine setup complete"
+                if [ "$pw_strategy" = "binary_only" ] && ! is_managed_launcher; then
+                    log_info "Note: Chromium system libraries were not installed automatically."
+                    log_info "      If browser tools fail at runtime, install the deps listed above."
+                fi
+            else
+                log_warn "Playwright browser install failed."
+                if [ -s "$pw_err_file" ]; then
+                    log_warn "  playwright error tail:"
+                    tail -n 5 "$pw_err_file" | sed 's/^/    /' >&2
+                fi
+                log_info "Re-run manually after install: cd $INSTALL_DIR && npx playwright install chromium"
+            fi
+            rm -f "$pw_err_file"
+        else
+            log_warn "Skipping Playwright install — Node deps for browser tools did not install."
+        fi
     fi
 
-    # Install TUI dependencies
+    # Install TUI dependencies (separate package.json under ui-tui/).
     if [ -f "$INSTALL_DIR/ui-tui/package.json" ]; then
         log_info "Installing TUI dependencies..."
-        cd "$INSTALL_DIR/ui-tui"
-        npm install --silent 2>/dev/null || {
-            log_warn "TUI npm install failed (hermes --tui may not work)"
-        }
-        log_success "TUI dependencies installed"
+        if _hermes_npm_install "$INSTALL_DIR/ui-tui" "TUI"; then
+            log_success "TUI dependencies installed"
+        else
+            log_info "Re-run manually after install: cd $INSTALL_DIR/ui-tui && npm install"
+        fi
     fi
-
-
 }
 
 run_setup_wizard() {
@@ -1544,6 +1645,7 @@ main() {
     print_banner
 
     detect_os
+    detect_launcher
     resolve_install_layout
     install_uv
     check_python
