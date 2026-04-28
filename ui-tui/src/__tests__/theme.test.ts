@@ -76,8 +76,9 @@ describe('fromSkin', () => {
     expect(brand.prompt).toBe('$')
   })
 
-  it('normalizes skin prompt symbols to one trimmed line', () => {
-    expect(fromSkin({}, { prompt_symbol: ' ⚔ ❯ \n' }).brand.prompt).toBe('⚔ ❯')
+  it('normalizes skin prompt symbols to one trimmed token', () => {
+    expect(fromSkin({}, { prompt_symbol: ' ⚔ ❯ \n' }).brand.prompt).toBe('❯')
+    expect(fromSkin({}, { prompt_symbol: ' Ψ > \n' }).brand.prompt).toBe('>')
     expect(fromSkin({}, { prompt_symbol: '\n\t' }).brand.prompt).toBe(DEFAULT_THEME.brand.prompt)
   })
 

@@ -93,7 +93,14 @@ const cleanPromptSymbol = (s: string | undefined, fallback: string) => {
     .replace(/\s+/g, ' ')
     .trim()
 
-  return cleaned || fallback
+  if (!cleaned) {
+    return fallback
+  }
+
+  // Classic skins sometimes store prompt_symbol as "<theme icon> <arrow>".
+  // The TUI composer already has other theme surfaces for identity; the input
+  // prompt itself must be one token so it doesn't render as duplicated symbols.
+  return cleaned.split(' ').at(-1) || fallback
 }
 
 export const DARK_THEME: Theme = {
