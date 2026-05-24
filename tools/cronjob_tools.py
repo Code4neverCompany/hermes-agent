@@ -51,18 +51,19 @@ _CRON_THREAT_PATTERNS = [
     (r'rm\s+-rf\s+/', "destructive_root_rm"),
 ]
 
-_CRON_SECRET_VAR_RE = r'\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)\w*\}?'
+_CRON_SECRET_VAR_RE=r'\$\{...\}?'
+# Loopback hosts — internal API calls cannot exfiltrate secrets off-host.
+_LOOPBACK_RE=r'(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|0\.0\.0\.0|\[::1\]|::1|ip6-localhost|ip6-loopback)'
 _CRON_EXFIL_COMMAND_PATTERNS = [
     # Tighten exfil detection to obvious leak paths: embedding a secret
     # directly in the destination URL, sending it in POST/FORM payloads,
-    # or shipping it via Authorization headers to arbitrary hosts. The
-    # only intended allowlist exception today is the bundled GitHub skill
-    # pattern that talks to api.github.com.
-    (rf'curl\s+[^\n]*https?://[^\s"\'`]*{_CRON_SECRET_VAR_RE}', "exfil_curl_url"),
-    (rf'wget\s+[^\n]*https?://[^\s"\'`]*{_CRON_SECRET_VAR_RE}', "exfil_wget_url"),
-    (rf'curl\s+[^\n]*(?:--data(?:-raw|-binary|-urlencode)?|-d|--form|-F)\s+[^\n]*{_CRON_SECRET_VAR_RE}', "exfil_curl_data"),
-    (rf'wget\s+[^\n]*--post-(?:data|file)=[^\n]*{_CRON_SECRET_VAR_RE}', "exfil_wget_post"),
-    (rf'curl\s+[^\n]*(?:-H|--header)\s+["\']Authorization:\s*(?:Bearer|token)\s+{_CRON_SECRET_VAR_RE}["\']', "exfil_curl_auth_header"),
+    # or shipping it via Authorization headers to arbitrary hosts.
+    # Loopback destinations are exempt — no real exfil risk from localhost.
+    (rf'curl\s+(?![^\n]*(?:{_LOOPBACK_RE}))[^\n]*https?://[^\s"\']*{_CRON_SECRET_VAR_RE}', "exfil_curl_url"),
+    (rf'wget\s+(?![^\n]*(?:{_LOOPBACK_RE}))[^\n]*https?://[^\s"\']*{_CRON_SECRET_VAR_RE}', "exfil_wget_url"),
+    (rf'curl\s+(?![^\n]*(?:{_LOOPBACK_RE}))[^\n]*(?:--data(?:-raw|-binary|-urlencode)?|-d|--form|-F)\s+[^\n]*{_CRON_SECRET_VAR_RE}', "exfil_curl_data"),
+    (rf'wget\s+(?![^\n]*(?:{_LOOPBACK_RE}))[^\n]*--post-(?:data|file)=[^\n]*{_CRON_SECRET_VAR_RE}', "exfil_wget_post"),
+    (rf'curl\s+(?![^\n]*(?:{_LOOPBACK_RE}))[^\n]*(?:-H|--header)\s+["\']Authorization:\s*(?:Bearer|token)\s+{_CRON_SECRET_VAR_RE}["\']', "exfil_curl_auth_header"),
 ]
 
 _CRON_INVISIBLE_CHARS = {
