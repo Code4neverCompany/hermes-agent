@@ -513,6 +513,9 @@ def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
     if not stdout:
         return None
 
+    if event == "on_session_start":
+        return None
+
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError:
